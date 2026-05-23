@@ -42,6 +42,7 @@ def init_db():
         service_id INTEGER,
         numbers TEXT,
         count INTEGER,
+        used_count INTEGER DEFAULT 0,
         UNIQUE(country_id, service_id)
     )
     """)
@@ -63,6 +64,10 @@ editing_service_id = {}
 upload_flow_country = {}
 upload_flow_service = {}
 upload_flow_numbers = {}
+
+# Get number flow states
+get_number_service = {}
+get_number_country = {}
 
 
 # ================= START =================
@@ -121,7 +126,18 @@ def handle(m):
     
     # ---------- USER ----------
     if text == "📱 GET NUMBER":
-        worker.submit(lambda: bot.send_message(m.chat.id, "📲 Processing..."))
+        cursor.execute("SELECT id, service FROM services")
+        services = cursor.fetchall()
+        
+        if not services:
+            bot.send_message(m.chat.id, "⚠️ No services available")
+            return
+        
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for service_id, service_name in services:
+            markup.add(types.InlineKeyboardButton(f"⚙️ {service_name}", callback_data=f"get_select_service_{service_id}"))
+        
+        bot.send_message(m.chat.id, "⚙️ Select Service:", reply_markup=markup)
         return
     
     elif text == "🟢 LIVE SYSTEM":
@@ -317,7 +333,97 @@ def handle_file(message):
 def callback(call):
     uid = call.from_user.id
     
-    if uid not in ADMIN_IDS:
+    # ---------- GET NUMBER - SELECT SERVICE ----------
+    if call.data.startswith("get_select_service_"):
+        service_id = int(call.data.split("_")[-1])
+        get_number_service[uid] = service_id
+        
+        # Get service name
+        cursor.execute("SELECT service FROM services WHERE id = ?", (service_id,))
+        service_result = cursor.fetchone()
+        service_name = service_result[0] if service_result else "Unknown"
+        
+        # Show countries that have numbers for this service
+        cursor.execute("""
+            SELECT DISTINCT c.id, c.country 
+            FROM countries c
+            JOIN numbers_upload n ON c.id = n.country_id
+            WHERE n.service_id = ? AND n.count > 0
+        """, (service_id,))
+        
+        countries = cursor.fetchall()
+        
+        if not countries:
+            bot.answer_callback_query(call.id, "⚠️ No numbers available for this service")
+            return
+        
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for country_id, country_name in countries:
+            markup.add(types.InlineKeyboardButton(f"🌍 {country_name}", callback_data=f"get_select_country_{country_id}_{service_id}"))
+        
+        bot.send_message(call.message.chat.id, "🌍 Select Country:", reply_markup=markup)
+    
+    # ---------- GET NUMBER - SELECT COUNTRY ----------
+    elif call.data.startswith("get_select_country_"):
+        parts = call.data.split("_")
+        country_id = int(parts[3])
+        service_id = int(parts[4])
+        
+        get_number_country[uid] = country_id
+        get_number_service[uid] = service_id
+        
+        # Get the numbers for this country-service combo
+        cursor.execute("""
+            SELECT c.country, s.service, n.numbers, n.used_count, n.count
+            FROM numbers_upload n
+            JOIN countries c ON n.country_id = c.id
+            JOIN services s ON n.service_id = s.id
+            WHERE n.country_id = ? AND n.service_id = ?
+        """, (country_id, service_id))
+        
+        result = cursor.fetchone()
+        
+        if not result:
+            bot.answer_callback_query(call.id, "⚠️ No numbers found")
+            return
+        
+        country_name, service_name, numbers_str, used_count, total_count = result
+        numbers_list = [n.strip() for n in numbers_str.split('\n') if n.strip()]
+        
+        if not numbers_list:
+            bot.answer_callback_query(call.id, "⚠️ No numbers available")
+            return
+        
+        # Get next available number
+        available_number = numbers_list[used_count] if used_count < len(numbers_list) else None
+        
+        if not available_number:
+            bot.answer_callback_query(call.id, "⚠️ All numbers have been used")
+            return
+        
+        # Update used count
+        new_used_count = used_count + 1
+        cursor.execute("""
+            UPDATE numbers_upload 
+            SET used_count = ? 
+            WHERE country_id = ? AND service_id = ?
+        """, (new_used_count, country_id, service_id))
+        conn.commit()
+        
+        # Send the number
+        message_text = f"""✅ NUMBER ASSIGNED
+
+🌍 Country: {country_name}
+⚙️ Service: {service_name}
+📱 Number: {available_number}
+
+📊 Progress: {new_used_count}/{total_count} used"""
+        
+        bot.send_message(call.message.chat.id, message_text)
+        bot.answer_callback_query(call.id, "✅ Number sent!")
+    
+    # Admin section - check permission
+    if uid not in ADMIN_IDS and not call.data.startswith("get_"):
         bot.answer_callback_query(call.id, "⛔ No permission")
         return
     
@@ -430,11 +536,11 @@ def callback(call):
             existing = cursor.fetchone()
             
             if existing:
-                cursor.execute("UPDATE numbers_upload SET numbers = ?, count = ? WHERE country_id = ? AND service_id = ?", 
+                cursor.execute("UPDATE numbers_upload SET numbers = ?, count = ?, used_count = 0 WHERE country_id = ? AND service_id = ?", 
                              (numbers_str, len(numbers_list), country_id, service_id))
             else:
-                cursor.execute("INSERT INTO numbers_upload (country_id, service_id, numbers, count) VALUES (?, ?, ?, ?)",
-                             (country_id, service_id, numbers_str, len(numbers_list)))
+                cursor.execute("INSERT INTO numbers_upload (country_id, service_id, numbers, count, used_count) VALUES (?, ?, ?, ?, ?)",
+                             (country_id, service_id, numbers_str, len(numbers_list), 0))
             
             conn.commit()
             
@@ -588,5 +694,5 @@ def callback(call):
 
 
 # ================= RUN =================
-print("🚀 BOT RUNNING - FULL FEATURES ACTIVE")
+print("🚀 BOT RUNNING - GET NUMBER FEATURE ACTIVE")
 bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=20)
