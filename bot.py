@@ -2,7 +2,6 @@ import telebot
 from telebot import types
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
-import os
 
 TOKEN = "8721478017:AAHIDuAOV0TRUT7iJTdtxOUF18Zh-wupPwE"
 
@@ -18,48 +17,49 @@ ADMIN_IDS = [8364889419]
 conn = sqlite3.connect("bot.db", check_same_thread=False)
 cursor = conn.cursor()
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS countries (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    country TEXT UNIQUE,
-    numbers TEXT DEFAULT ''
-)
-""")
+# Create tables
+def init_db():
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS countries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        country TEXT UNIQUE,
+        numbers TEXT DEFAULT ''
+    )
+    """)
+    
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS services (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        service TEXT UNIQUE,
+        numbers TEXT DEFAULT ''
+    )
+    """)
+    
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS numbers_upload (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        country_id INTEGER,
+        service_id INTEGER,
+        numbers TEXT,
+        count INTEGER,
+        UNIQUE(country_id, service_id)
+    )
+    """)
+    
+    conn.commit()
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS services (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    service TEXT UNIQUE,
-    numbers TEXT DEFAULT ''
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS numbers_upload (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    country_id INTEGER,
-    service_id INTEGER,
-    numbers TEXT,
-    count INTEGER,
-    UNIQUE(country_id, service_id)
-)
-""")
-
-conn.commit()
-
+init_db()
 
 # ================= WORKER =================
 worker = ThreadPoolExecutor(max_workers=10)
 
-
 # ================= STEP MEMORY =================
 waiting_country = {}
 waiting_service = {}
-waiting_upload_number = {}
 editing_country_id = {}
 editing_service_id = {}
 
-# New states for upload flow
+# Upload flow states
 upload_flow_country = {}
 upload_flow_service = {}
 upload_flow_numbers = {}
@@ -68,33 +68,32 @@ upload_flow_numbers = {}
 # ================= START =================
 @bot.message_handler(commands=['start'])
 def start(message):
-
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-
+    
     markup.row(
         types.KeyboardButton("📱 GET NUMBER"),
         types.KeyboardButton("🟢 LIVE SYSTEM")
     )
-
+    
     markup.row(
         types.KeyboardButton("💰 WALLET"),
         types.KeyboardButton("💵 WITHDRAW")
     )
-
+    
     markup.row(
         types.KeyboardButton("🔧 SUPPORT")
     )
-
+    
     if message.from_user.id in ADMIN_IDS:
         markup.row(types.KeyboardButton("⚙️ ADMIN SETTINGS"))
-
+    
     bot.send_message(message.chat.id, "✨ Bot Started", reply_markup=markup)
 
 
 # ================= ADMIN PANEL =================
 def admin_panel():
     markup = types.InlineKeyboardMarkup(row_width=2)
-
+    
     markup.add(
         types.InlineKeyboardButton("➕ Add Country", callback_data="add_country"),
         types.InlineKeyboardButton("➕ Add Service", callback_data="add_service"),
@@ -107,35 +106,40 @@ def admin_panel():
         types.InlineKeyboardButton("🚫 Ban / Unban", callback_data="ban_unban"),
         types.InlineKeyboardButton("❌ Close", callback_data="close")
     )
-
+    
     return markup
 
 
 # ================= MESSAGE HANDLER =================
 @bot.message_handler(func=lambda m: True)
 def handle(m):
-
     uid = m.from_user.id
     text = m.text
-
-
+    
+    if text is None:
+        return
+    
     # ---------- USER ----------
     if text == "📱 GET NUMBER":
         worker.submit(lambda: bot.send_message(m.chat.id, "📲 Processing..."))
-
+        return
+    
     elif text == "🟢 LIVE SYSTEM":
         worker.submit(lambda: bot.send_message(m.chat.id, "✅ Online"))
-
+        return
+    
     elif text == "💰 WALLET":
         worker.submit(lambda: bot.send_message(m.chat.id, "💳 Balance: $0"))
-
+        return
+    
     elif text == "💵 WITHDRAW":
         worker.submit(lambda: bot.send_message(m.chat.id, "💸 Coming soon"))
-
+        return
+    
     elif text == "🔧 SUPPORT":
         worker.submit(lambda: bot.send_message(m.chat.id, "📩 @support"))
-
-
+        return
+    
     # ---------- ADMIN OPEN ----------
     elif text == "⚙️ ADMIN SETTINGS":
         if uid in ADMIN_IDS:
@@ -146,70 +150,87 @@ def handle(m):
             )
         else:
             bot.send_message(m.chat.id, "⛔ Not admin")
-
-
+        return
+    
     # ---------- ADD COUNTRY INPUT ----------
     if uid in waiting_country and isinstance(waiting_country[uid], bool):
-
-        country = text
-
+        country = text.strip()
+        
+        if not country:
+            bot.send_message(m.chat.id, "⚠️ Country name cannot be empty")
+            return
+        
         try:
             cursor.execute("INSERT INTO countries (country, numbers) VALUES (?, ?)", (country, ''))
             conn.commit()
             bot.send_message(m.chat.id, f"✅ Country Saved: {country}")
-        except:
-            bot.send_message(m.chat.id, "⚠️ Already exists / error")
-
+        except sqlite3.IntegrityError:
+            bot.send_message(m.chat.id, "⚠️ Country already exists")
+        except Exception as e:
+            bot.send_message(m.chat.id, f"⚠️ Error: {str(e)}")
+        
         waiting_country.pop(uid, None)
         return
-
-
+    
     # ---------- EDIT COUNTRY INPUT ----------
     if uid in editing_country_id:
         country_id = editing_country_id[uid]
-        new_country_name = text
-
+        new_country_name = text.strip()
+        
+        if not new_country_name:
+            bot.send_message(m.chat.id, "⚠️ Country name cannot be empty")
+            return
+        
         try:
             cursor.execute("UPDATE countries SET country = ? WHERE id = ?", (new_country_name, country_id))
             conn.commit()
             bot.send_message(m.chat.id, f"✅ Country Updated: {new_country_name}")
-        except:
-            bot.send_message(m.chat.id, "⚠️ Error updating country")
-
+        except sqlite3.IntegrityError:
+            bot.send_message(m.chat.id, "⚠️ Country name already exists")
+        except Exception as e:
+            bot.send_message(m.chat.id, f"⚠️ Error: {str(e)}")
+        
         editing_country_id.pop(uid, None)
         return
-
-
+    
     # ---------- ADD SERVICE INPUT ----------
     if uid in waiting_service and isinstance(waiting_service[uid], bool):
-
-        service = m.text.strip()
-
+        service = text.strip()
+        
+        if not service:
+            bot.send_message(m.chat.id, "⚠️ Service name cannot be empty")
+            return
+        
         try:
             cursor.execute("INSERT INTO services (service, numbers) VALUES (?, ?)", (service, ''))
             conn.commit()
-
             bot.send_message(m.chat.id, f"✅ Service Added: {service}")
-
-        except:
-            bot.send_message(m.chat.id, "⚠️ Already exists or error!")
-
+        except sqlite3.IntegrityError:
+            bot.send_message(m.chat.id, "⚠️ Service already exists")
+        except Exception as e:
+            bot.send_message(m.chat.id, f"⚠️ Error: {str(e)}")
+        
         waiting_service.pop(uid, None)
         return
-
-
+    
     # ---------- EDIT SERVICE INPUT ----------
     if uid in editing_service_id:
         service_id = editing_service_id[uid]
-        new_service_name = m.text.strip()
-
+        new_service_name = text.strip()
+        
+        if not new_service_name:
+            bot.send_message(m.chat.id, "⚠️ Service name cannot be empty")
+            return
+        
         try:
             cursor.execute("UPDATE services SET service = ? WHERE id = ?", (new_service_name, service_id))
             conn.commit()
             bot.send_message(m.chat.id, f"✅ Service Updated: {new_service_name}")
-        except:
-            bot.send_message(m.chat.id, "⚠️ Error updating service")
-
+        except sqlite3.IntegrityError:
+            bot.send_message(m.chat.id, "⚠️ Service name already exists")
+        except Exception as e:
+            bot.send_message(m.chat.id, f"⚠️ Error: {str(e)}")
+        
         editing_service_id.pop(uid, None)
         return
 
@@ -224,20 +245,18 @@ def handle_file(message):
         return
     
     # Check if file is txt
-    file_info = bot.get_file(message.document.file_id)
     if not message.document.file_name.endswith('.txt'):
         bot.send_message(message.chat.id, "⚠️ Only .txt files accepted")
         return
     
     try:
-        # Download file
+        file_info = bot.get_file(message.document.file_id)
         downloaded_file = bot.download_file(file_info.file_path)
         
-        # Read numbers from file
-        numbers_text = downloaded_file.decode('utf-8')
-        
-        # Parse numbers (split by newline or comma)
+        # Read and parse numbers
+        numbers_text = downloaded_file.decode('utf-8', errors='ignore')
         numbers_list = []
+        
         for line in numbers_text.split('\n'):
             for num in line.split(','):
                 num = num.strip()
@@ -248,7 +267,6 @@ def handle_file(message):
             bot.send_message(message.chat.id, "⚠️ No numbers found in file")
             return
         
-        # Store numbers in memory
         upload_flow_numbers[uid] = numbers_list
         
         # Get country and service details
@@ -265,7 +283,7 @@ def handle_file(message):
         
         # Create preview
         total_count = len(numbers_list)
-        sample_numbers = numbers_list[:5]  # Show first 5
+        sample_numbers = numbers_list[:5]
         
         preview_text = f"""📊 UPLOAD PREVIEW
 
@@ -297,56 +315,49 @@ def handle_file(message):
 # ================= CALLBACK =================
 @bot.callback_query_handler(func=lambda call: True)
 def callback(call):
-
     uid = call.from_user.id
-
+    
     if uid not in ADMIN_IDS:
         bot.answer_callback_query(call.id, "⛔ No permission")
         return
-
-
+    
     # ---------- ADD COUNTRY ----------
     if call.data == "add_country":
         waiting_country[uid] = True
-        bot.send_message(call.message.chat.id,
-            "🌍 Send country name:\nExample: Myanmar"
-        )
-
-
+        bot.send_message(call.message.chat.id, "🌍 Send country name:\nExample: Myanmar")
+    
     # ---------- ADD SERVICE ----------
     elif call.data == "add_service":
         waiting_service[uid] = True
-        bot.send_message(call.message.chat.id,
-            "⚙️ Enter service name:\n\nExample: Facebook"
-        )
-
-
+        bot.send_message(call.message.chat.id, "⚙️ Enter service name:\n\nExample: Facebook")
+    
     # ---------- COUNTRY BOARD ----------
     elif call.data == "country_board":
-
         cursor.execute("SELECT id, country FROM countries")
         rows = cursor.fetchall()
-
+        
         if not rows:
             bot.send_message(call.message.chat.id, "📊 No countries")
             return
-
+        
         markup = types.InlineKeyboardMarkup(row_width=1)
-
         for country_id, country_name in rows:
             markup.add(types.InlineKeyboardButton(f"🌍 {country_name}", callback_data=f"country_options_{country_id}"))
-
+        
         markup.add(types.InlineKeyboardButton("⬅️ Back", callback_data="admin_panel_back"))
-
         bot.send_message(call.message.chat.id, "🌍 COUNTRY LIST:", reply_markup=markup)
-
-
+    
     # ---------- COUNTRY OPTIONS ----------
     elif call.data.startswith("country_options_"):
         country_id = int(call.data.split("_")[-1])
         cursor.execute("SELECT country FROM countries WHERE id = ?", (country_id,))
-        country_name = cursor.fetchone()[0]
-
+        result = cursor.fetchone()
+        
+        if not result:
+            bot.answer_callback_query(call.id, "Country not found")
+            return
+        
+        country_name = result[0]
         markup = types.InlineKeyboardMarkup(row_width=1)
         markup.add(
             types.InlineKeyboardButton("✏️ Edit", callback_data=f"edit_country_{country_id}"),
@@ -355,35 +366,32 @@ def callback(call):
             types.InlineKeyboardButton("🔄 Clear Numbers", callback_data=f"clear_country_{country_id}"),
             types.InlineKeyboardButton("⬅️ Back", callback_data="country_board")
         )
-
+        
         bot.edit_message_text(f"🌍 {country_name}\n\nSelect Action:", call.message.chat.id, call.message.message_id, reply_markup=markup)
-
-
+    
     # ---------- DELETE COUNTRY ----------
     elif call.data.startswith("delete_country_"):
         country_id = int(call.data.split("_")[-1])
         try:
             cursor.execute("DELETE FROM countries WHERE id = ?", (country_id,))
+            cursor.execute("DELETE FROM numbers_upload WHERE country_id = ?", (country_id,))
             conn.commit()
             bot.answer_callback_query(call.id, "✅ Country Deleted")
             bot.edit_message_text("✅ Country deleted!", call.message.chat.id, call.message.message_id)
-        except:
-            bot.answer_callback_query(call.id, "❌ Error")
-
-
+        except Exception as e:
+            bot.answer_callback_query(call.id, f"❌ Error: {str(e)}")
+    
     # ---------- EDIT COUNTRY ----------
     elif call.data.startswith("edit_country_"):
         country_id = int(call.data.split("_")[-1])
         editing_country_id[uid] = country_id
         bot.send_message(call.message.chat.id, "🌍 Send new country name:")
-
-
-    # ---------- UPLOAD COUNTRY NUMBERS (NEW FLOW) ----------
+    
+    # ---------- UPLOAD COUNTRY NUMBERS ----------
     elif call.data.startswith("upload_country_"):
         country_id = int(call.data.split("_")[-1])
         upload_flow_country[uid] = country_id
         
-        # Show service list
         cursor.execute("SELECT id, service FROM services")
         services = cursor.fetchall()
         
@@ -397,31 +405,27 @@ def callback(call):
             markup.add(types.InlineKeyboardButton(f"⚙️ {service_name}", callback_data=f"select_service_for_upload_{service_id}"))
         
         bot.send_message(call.message.chat.id, "⚙️ Select Service:", reply_markup=markup)
-
-
+    
     # ---------- SELECT SERVICE FOR UPLOAD ----------
     elif call.data.startswith("select_service_for_upload_"):
         service_id = int(call.data.split("_")[-1])
         upload_flow_service[uid] = service_id
-        
         bot.send_message(call.message.chat.id, "📄 Send .txt file\n\nNumbers format:\n- One per line\n- Or comma separated")
-
-
+    
     # ---------- CONFIRM AND SAVE UPLOAD ----------
     elif call.data.startswith("confirm_upload_"):
-        parts = call.data.split("_")
-        country_id = int(parts[2])
-        service_id = int(parts[3])
-        
-        if uid not in upload_flow_numbers:
-            bot.answer_callback_query(call.id, "⚠️ Error")
-            return
-        
-        numbers_list = upload_flow_numbers[uid]
-        numbers_str = "\n".join(numbers_list)
-        
         try:
-            # Check if entry exists
+            parts = call.data.split("_")
+            country_id = int(parts[2])
+            service_id = int(parts[3])
+            
+            if uid not in upload_flow_numbers:
+                bot.answer_callback_query(call.id, "⚠️ Error")
+                return
+            
+            numbers_list = upload_flow_numbers[uid]
+            numbers_str = "\n".join(numbers_list)
+            
             cursor.execute("SELECT id FROM numbers_upload WHERE country_id = ? AND service_id = ?", (country_id, service_id))
             existing = cursor.fetchone()
             
@@ -437,23 +441,20 @@ def callback(call):
             bot.edit_message_text(f"✅ Saved Successfully!\n\n📊 Total: {len(numbers_list)} numbers", 
                                  call.message.chat.id, call.message.message_id)
             
-            # Clean up
             upload_flow_country.pop(uid, None)
             upload_flow_service.pop(uid, None)
             upload_flow_numbers.pop(uid, None)
             
         except Exception as e:
             bot.answer_callback_query(call.id, f"❌ Error: {str(e)}")
-
-
+    
     # ---------- CANCEL UPLOAD ----------
     elif call.data == "cancel_upload":
         upload_flow_country.pop(uid, None)
         upload_flow_service.pop(uid, None)
         upload_flow_numbers.pop(uid, None)
         bot.edit_message_text("❌ Cancelled", call.message.chat.id, call.message.message_id)
-
-
+    
     # ---------- CLEAR COUNTRY NUMBERS ----------
     elif call.data.startswith("clear_country_"):
         country_id = int(call.data.split("_")[-1])
@@ -462,36 +463,36 @@ def callback(call):
             conn.commit()
             bot.answer_callback_query(call.id, "✅ Cleared")
             bot.edit_message_text("✅ Numbers cleared!", call.message.chat.id, call.message.message_id)
-        except:
-            bot.answer_callback_query(call.id, "❌ Error")
-
-
+        except Exception as e:
+            bot.answer_callback_query(call.id, f"❌ Error: {str(e)}")
+    
     # ---------- SERVICE BOARD ----------
     elif call.data == "service_board":
-
         cursor.execute("SELECT id, service FROM services")
         rows = cursor.fetchall()
-
+        
         if not rows:
             bot.send_message(call.message.chat.id, "⚙️ No services")
             return
-
+        
         markup = types.InlineKeyboardMarkup(row_width=1)
-
         for service_id, service_name in rows:
             markup.add(types.InlineKeyboardButton(f"⚙️ {service_name}", callback_data=f"service_options_{service_id}"))
-
+        
         markup.add(types.InlineKeyboardButton("⬅️ Back", callback_data="admin_panel_back"))
-
         bot.send_message(call.message.chat.id, "⚙️ SERVICE LIST:", reply_markup=markup)
-
-
+    
     # ---------- SERVICE OPTIONS ----------
     elif call.data.startswith("service_options_"):
         service_id = int(call.data.split("_")[-1])
         cursor.execute("SELECT service FROM services WHERE id = ?", (service_id,))
-        service_name = cursor.fetchone()[0]
-
+        result = cursor.fetchone()
+        
+        if not result:
+            bot.answer_callback_query(call.id, "Service not found")
+            return
+        
+        service_name = result[0]
         markup = types.InlineKeyboardMarkup(row_width=1)
         markup.add(
             types.InlineKeyboardButton("✏️ Edit", callback_data=f"edit_service_{service_id}"),
@@ -500,35 +501,32 @@ def callback(call):
             types.InlineKeyboardButton("🔄 Clear Numbers", callback_data=f"clear_service_{service_id}"),
             types.InlineKeyboardButton("⬅️ Back", callback_data="service_board")
         )
-
+        
         bot.edit_message_text(f"⚙️ {service_name}\n\nSelect Action:", call.message.chat.id, call.message.message_id, reply_markup=markup)
-
-
+    
     # ---------- DELETE SERVICE ----------
     elif call.data.startswith("delete_service_"):
         service_id = int(call.data.split("_")[-1])
         try:
             cursor.execute("DELETE FROM services WHERE id = ?", (service_id,))
+            cursor.execute("DELETE FROM numbers_upload WHERE service_id = ?", (service_id,))
             conn.commit()
             bot.answer_callback_query(call.id, "✅ Service Deleted")
             bot.edit_message_text("✅ Service deleted!", call.message.chat.id, call.message.message_id)
-        except:
-            bot.answer_callback_query(call.id, "❌ Error")
-
-
+        except Exception as e:
+            bot.answer_callback_query(call.id, f"❌ Error: {str(e)}")
+    
     # ---------- EDIT SERVICE ----------
     elif call.data.startswith("edit_service_"):
         service_id = int(call.data.split("_")[-1])
         editing_service_id[uid] = service_id
         bot.send_message(call.message.chat.id, "⚙️ Send new service name:")
-
-
-    # ---------- UPLOAD SERVICE NUMBERS (NEW FLOW) ----------
+    
+    # ---------- UPLOAD SERVICE NUMBERS ----------
     elif call.data.startswith("upload_service_"):
         service_id = int(call.data.split("_")[-1])
         upload_flow_service[uid] = service_id
         
-        # Show country list
         cursor.execute("SELECT id, country FROM countries")
         countries = cursor.fetchall()
         
@@ -542,16 +540,13 @@ def callback(call):
             markup.add(types.InlineKeyboardButton(f"🌍 {country_name}", callback_data=f"select_country_for_upload_{country_id}"))
         
         bot.send_message(call.message.chat.id, "🌍 Select Country:", reply_markup=markup)
-
-
+    
     # ---------- SELECT COUNTRY FOR UPLOAD ----------
     elif call.data.startswith("select_country_for_upload_"):
         country_id = int(call.data.split("_")[-1])
         upload_flow_country[uid] = country_id
-        
         bot.send_message(call.message.chat.id, "📄 Send .txt file\n\nNumbers format:\n- One per line\n- Or comma separated")
-
-
+    
     # ---------- CLEAR SERVICE NUMBERS ----------
     elif call.data.startswith("clear_service_"):
         service_id = int(call.data.split("_")[-1])
@@ -560,10 +555,9 @@ def callback(call):
             conn.commit()
             bot.answer_callback_query(call.id, "✅ Cleared")
             bot.edit_message_text("✅ Numbers cleared!", call.message.chat.id, call.message.message_id)
-        except:
-            bot.answer_callback_query(call.id, "❌ Error")
-
-
+        except Exception as e:
+            bot.answer_callback_query(call.id, f"❌ Error: {str(e)}")
+    
     # ---------- OTP PROVIDER ----------
     elif call.data == "otp_provider":
         bot.send_message(call.message.chat.id, """📡 OTP PROVIDER
@@ -573,23 +567,22 @@ def callback(call):
 📧 Gmail Provider
 
 ⚙️ Admin Controlled""")
-
-
+    
     elif call.data == "broadcast":
         bot.send_message(call.message.chat.id, "📢 Broadcast")
-
+    
     elif call.data == "force_channel":
         bot.send_message(call.message.chat.id, "📡 Force Channel")
-
+    
     elif call.data == "system_setting":
         bot.send_message(call.message.chat.id, "⚙️ System Setting")
-
+    
     elif call.data == "ban_unban":
         bot.send_message(call.message.chat.id, "🚫 Ban / Unban")
-
+    
     elif call.data == "admin_panel_back":
         bot.edit_message_text("🔐 ADMIN PANEL", call.message.chat.id, call.message.message_id, reply_markup=admin_panel())
-
+    
     elif call.data == "close":
         bot.delete_message(call.message.chat.id, call.message.message_id)
 
