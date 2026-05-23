@@ -34,6 +34,17 @@ CREATE TABLE IF NOT EXISTS services (
 )
 """)
 
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS numbers_upload (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    country_id INTEGER,
+    service_id INTEGER,
+    numbers TEXT,
+    count INTEGER,
+    UNIQUE(country_id, service_id)
+)
+""")
+
 conn.commit()
 
 
@@ -61,17 +72,17 @@ def start(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
 
     markup.row(
-        types.KeyboardButton("☎️ GET NUMBER"),
+        types.KeyboardButton("📱 GET NUMBER"),
         types.KeyboardButton("🟢 LIVE SYSTEM")
     )
 
     markup.row(
-        types.KeyboardButton("👛 WALLET"),
+        types.KeyboardButton("💰 WALLET"),
         types.KeyboardButton("💵 WITHDRAW")
     )
 
     markup.row(
-        types.KeyboardButton("🛠️ SUPPORT")
+        types.KeyboardButton("🔧 SUPPORT")
     )
 
     if message.from_user.id in ADMIN_IDS:
@@ -109,19 +120,19 @@ def handle(m):
 
 
     # ---------- USER ----------
-    if text == "☎️ GET NUMBER":
+    if text == "📱 GET NUMBER":
         worker.submit(lambda: bot.send_message(m.chat.id, "📲 Processing..."))
 
     elif text == "🟢 LIVE SYSTEM":
         worker.submit(lambda: bot.send_message(m.chat.id, "✅ Online"))
 
-    elif text == "👛 WALLET":
-        worker.submit(lambda: bot.send_message(m.chat.id, "💰 Balance: $0"))
+    elif text == "💰 WALLET":
+        worker.submit(lambda: bot.send_message(m.chat.id, "💳 Balance: $0"))
 
     elif text == "💵 WITHDRAW":
         worker.submit(lambda: bot.send_message(m.chat.id, "💸 Coming soon"))
 
-    elif text == "🛠️ SUPPORT":
+    elif text == "🔧 SUPPORT":
         worker.submit(lambda: bot.send_message(m.chat.id, "📩 @support"))
 
 
@@ -203,10 +214,6 @@ def handle(m):
         return
 
 
-    # ---------- UPLOAD NUMBERS (OLD METHOD - REMOVED) ----------
-    # Removed old upload_number flow
-
-
 # ================= FILE HANDLER FOR TXT UPLOAD =================
 @bot.message_handler(content_types=['document'])
 def handle_file(message):
@@ -219,7 +226,7 @@ def handle_file(message):
     # Check if file is txt
     file_info = bot.get_file(message.document.file_id)
     if not message.document.file_name.endswith('.txt'):
-        bot.send_message(message.chat.id, "⚠️ শুধুমাত্র .txt ফাইল গ্রহণ করা হয়")
+        bot.send_message(message.chat.id, "⚠️ Only .txt files accepted")
         return
     
     try:
@@ -238,7 +245,7 @@ def handle_file(message):
                     numbers_list.append(num)
         
         if not numbers_list:
-            bot.send_message(message.chat.id, "⚠️ ফাইলে কোন নম্বর নেই")
+            bot.send_message(message.chat.id, "⚠️ No numbers found in file")
             return
         
         # Store numbers in memory
@@ -249,29 +256,30 @@ def handle_file(message):
         service_id = upload_flow_service[uid]
         
         cursor.execute("SELECT country FROM countries WHERE id = ?", (country_id,))
-        country_name = cursor.fetchone()[0]
+        country_result = cursor.fetchone()
+        country_name = country_result[0] if country_result else "Unknown"
         
         cursor.execute("SELECT service FROM services WHERE id = ?", (service_id,))
-        service_name = cursor.fetchone()[0]
+        service_result = cursor.fetchone()
+        service_name = service_result[0] if service_result else "Unknown"
         
         # Create preview
         total_count = len(numbers_list)
         sample_numbers = numbers_list[:5]  # Show first 5
         
-        preview_text = f"""
-📊 <b>UPLOAD PREVIEW</b>
+        preview_text = f"""📊 UPLOAD PREVIEW
 
-🌍 <b>Country:</b> {country_name}
-⚙️ <b>Service:</b> {service_name}
-📊 <b>Total Count:</b> {total_count}
+🌍 Country: {country_name}
+⚙️ Service: {service_name}
+📊 Total Count: {total_count}
 
-📝 <b>Sample Numbers (First 5):</b>
+📝 Sample Numbers (First 5):
 """
         for i, num in enumerate(sample_numbers, 1):
             preview_text += f"\n{i}. {num}"
         
         if total_count > 5:
-            preview_text += f"\n... এবং আরও {total_count - 5}টি"
+            preview_text += f"\n... and {total_count - 5} more"
         
         # Show confirm buttons
         markup = types.InlineKeyboardMarkup(row_width=2)
@@ -280,10 +288,10 @@ def handle_file(message):
             types.InlineKeyboardButton("❌ Cancel", callback_data="cancel_upload")
         )
         
-        bot.send_message(message.chat.id, preview_text, reply_markup=markup, parse_mode='HTML')
+        bot.send_message(message.chat.id, preview_text, reply_markup=markup)
         
     except Exception as e:
-        bot.send_message(message.chat.id, f"⚠️ ফাইল পড়তে ত্রুটি: {str(e)}")
+        bot.send_message(message.chat.id, f"⚠️ Error reading file: {str(e)}")
 
 
 # ================= CALLBACK =================
@@ -301,7 +309,7 @@ def callback(call):
     if call.data == "add_country":
         waiting_country[uid] = True
         bot.send_message(call.message.chat.id,
-            "🌍 Send country:\nExample: 🇲🇲 Myanmar"
+            "🌍 Send country name:\nExample: Myanmar"
         )
 
 
@@ -380,7 +388,7 @@ def callback(call):
         services = cursor.fetchall()
         
         if not services:
-            bot.send_message(call.message.chat.id, "⚠️ প্রথমে সার্ভিস যোগ করুন")
+            bot.send_message(call.message.chat.id, "⚠️ Add services first")
             upload_flow_country.pop(uid, None)
             return
         
@@ -388,7 +396,7 @@ def callback(call):
         for service_id, service_name in services:
             markup.add(types.InlineKeyboardButton(f"⚙️ {service_name}", callback_data=f"select_service_for_upload_{service_id}"))
         
-        bot.send_message(call.message.chat.id, "⚙️ সার্ভিস নির্বাচন করুন:", reply_markup=markup)
+        bot.send_message(call.message.chat.id, "⚙️ Select Service:", reply_markup=markup)
 
 
     # ---------- SELECT SERVICE FOR UPLOAD ----------
@@ -396,7 +404,7 @@ def callback(call):
         service_id = int(call.data.split("_")[-1])
         upload_flow_service[uid] = service_id
         
-        bot.send_message(call.message.chat.id, "📄 এখন .txt ফাইল পাঠান\n\n📌 ফাইলে নম্বরগুলি এমনভাবে থাকতে হবে:\n- প্রতিটি লাইনে একটি নম্বর\n- অথবা কমা দিয়ে আলাদা করা")
+        bot.send_message(call.message.chat.id, "📄 Send .txt file\n\nNumbers format:\n- One per line\n- Or comma separated")
 
 
     # ---------- CONFIRM AND SAVE UPLOAD ----------
@@ -406,31 +414,16 @@ def callback(call):
         service_id = int(parts[3])
         
         if uid not in upload_flow_numbers:
-            bot.answer_callback_query(call.id, "⚠️ ত্রুটি")
+            bot.answer_callback_query(call.id, "⚠️ Error")
             return
         
         numbers_list = upload_flow_numbers[uid]
         numbers_str = "\n".join(numbers_list)
         
         try:
-            # Create combined key for this country-service pair
-            combined_key = f"{country_id}_{service_id}"
-            
             # Check if entry exists
             cursor.execute("SELECT id FROM numbers_upload WHERE country_id = ? AND service_id = ?", (country_id, service_id))
             existing = cursor.fetchone()
-            
-            # Create table if not exists
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS numbers_upload (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                country_id INTEGER,
-                service_id INTEGER,
-                numbers TEXT,
-                count INTEGER,
-                UNIQUE(country_id, service_id)
-            )
-            """)
             
             if existing:
                 cursor.execute("UPDATE numbers_upload SET numbers = ?, count = ? WHERE country_id = ? AND service_id = ?", 
@@ -441,7 +434,7 @@ def callback(call):
             
             conn.commit()
             
-            bot.edit_message_text(f"✅ সফলভাবে সংরক্ষিত!\n\n📊 মোট নম্বর: {len(numbers_list)}", 
+            bot.edit_message_text(f"✅ Saved Successfully!\n\n📊 Total: {len(numbers_list)} numbers", 
                                  call.message.chat.id, call.message.message_id)
             
             # Clean up
@@ -450,7 +443,7 @@ def callback(call):
             upload_flow_numbers.pop(uid, None)
             
         except Exception as e:
-            bot.answer_callback_query(call.id, f"❌ ত্রুটি: {str(e)}")
+            bot.answer_callback_query(call.id, f"❌ Error: {str(e)}")
 
 
     # ---------- CANCEL UPLOAD ----------
@@ -458,7 +451,7 @@ def callback(call):
         upload_flow_country.pop(uid, None)
         upload_flow_service.pop(uid, None)
         upload_flow_numbers.pop(uid, None)
-        bot.edit_message_text("❌ বাতিল করা হয়েছে", call.message.chat.id, call.message.message_id)
+        bot.edit_message_text("❌ Cancelled", call.message.chat.id, call.message.message_id)
 
 
     # ---------- CLEAR COUNTRY NUMBERS ----------
@@ -467,7 +460,7 @@ def callback(call):
         try:
             cursor.execute("DELETE FROM numbers_upload WHERE country_id = ?", (country_id,))
             conn.commit()
-            bot.answer_callback_query(call.id, "✅ Numbers Cleared")
+            bot.answer_callback_query(call.id, "✅ Cleared")
             bot.edit_message_text("✅ Numbers cleared!", call.message.chat.id, call.message.message_id)
         except:
             bot.answer_callback_query(call.id, "❌ Error")
@@ -540,7 +533,7 @@ def callback(call):
         countries = cursor.fetchall()
         
         if not countries:
-            bot.send_message(call.message.chat.id, "⚠️ প্রথমে দেশ যোগ করুন")
+            bot.send_message(call.message.chat.id, "⚠️ Add countries first")
             upload_flow_service.pop(uid, None)
             return
         
@@ -548,7 +541,7 @@ def callback(call):
         for country_id, country_name in countries:
             markup.add(types.InlineKeyboardButton(f"🌍 {country_name}", callback_data=f"select_country_for_upload_{country_id}"))
         
-        bot.send_message(call.message.chat.id, "🌍 দেশ নির্বাচন করুন:", reply_markup=markup)
+        bot.send_message(call.message.chat.id, "🌍 Select Country:", reply_markup=markup)
 
 
     # ---------- SELECT COUNTRY FOR UPLOAD ----------
@@ -556,7 +549,7 @@ def callback(call):
         country_id = int(call.data.split("_")[-1])
         upload_flow_country[uid] = country_id
         
-        bot.send_message(call.message.chat.id, "📄 এখন .txt ফাইল পাঠান\n\n📌 ফাইলে নম্বরগুলি এমনভাবে থাকতে হবে:\n- প্রতিটি লাইনে একটি নম্বর\n- অথবা কমা দিয়ে আলাদা করা")
+        bot.send_message(call.message.chat.id, "📄 Send .txt file\n\nNumbers format:\n- One per line\n- Or comma separated")
 
 
     # ---------- CLEAR SERVICE NUMBERS ----------
@@ -565,7 +558,7 @@ def callback(call):
         try:
             cursor.execute("DELETE FROM numbers_upload WHERE service_id = ?", (service_id,))
             conn.commit()
-            bot.answer_callback_query(call.id, "✅ Numbers Cleared")
+            bot.answer_callback_query(call.id, "✅ Cleared")
             bot.edit_message_text("✅ Numbers cleared!", call.message.chat.id, call.message.message_id)
         except:
             bot.answer_callback_query(call.id, "❌ Error")
@@ -602,5 +595,5 @@ def callback(call):
 
 
 # ================= RUN =================
-print("🚀 FULL BOT RUNNING (COUNTRY + SERVICE + ADMIN + WORKER + NEW UPLOAD FLOW)")
+print("🚀 BOT RUNNING - FULL FEATURES ACTIVE")
 bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=20)
