@@ -68,6 +68,7 @@ upload_flow_numbers = {}
 # Get number flow states
 get_number_service = {}
 get_number_country = {}
+get_number_current = {}
 
 
 # ================= START =================
@@ -135,7 +136,19 @@ def handle(m):
         
         markup = types.InlineKeyboardMarkup(row_width=1)
         for service_id, service_name in services:
-            markup.add(types.InlineKeyboardButton(f"⚙️ {service_name}", callback_data=f"get_select_service_{service_id}"))
+            # Check if service has any numbers
+            cursor.execute("""
+                SELECT COUNT(*) FROM numbers_upload 
+                WHERE service_id = ? AND count > 0
+            """, (service_id,))
+            
+            count = cursor.fetchone()[0]
+            if count > 0:
+                markup.add(types.InlineKeyboardButton(f"⚙️ {service_name}", callback_data=f"get_select_service_{service_id}"))
+        
+        if not markup.keyboard:
+            bot.send_message(m.chat.id, "⚠️ No numbers available for any service")
+            return
         
         bot.send_message(m.chat.id, "⚙️ Select Service:", reply_markup=markup)
         return
@@ -361,9 +374,9 @@ def callback(call):
         for country_id, country_name in countries:
             markup.add(types.InlineKeyboardButton(f"🌍 {country_name}", callback_data=f"get_select_country_{country_id}_{service_id}"))
         
-        bot.send_message(call.message.chat.id, "🌍 Select Country:", reply_markup=markup)
+        bot.edit_message_text("🌍 Select Country:", call.message.chat.id, call.message.message_id, reply_markup=markup)
     
-    # ---------- GET NUMBER - SELECT COUNTRY ----------
+    # ---------- GET NUMBER - SELECT COUNTRY & SHOW TABLE ----------
     elif call.data.startswith("get_select_country_"):
         parts = call.data.split("_")
         country_id = int(parts[3])
@@ -398,8 +411,48 @@ def callback(call):
         available_number = numbers_list[used_count] if used_count < len(numbers_list) else None
         
         if not available_number:
-            bot.answer_callback_query(call.id, "⚠️ All numbers have been used")
+            bot.send_message(call.message.chat.id, "⚠️ All numbers have been used for this country-service combo")
             return
+        
+        # Store current number
+        get_number_current[uid] = (available_number, country_id, service_id, used_count, total_count, country_name, service_name)
+        
+        # Create table view
+        table_text = f"""
+┌─────────────────────────────────────┐
+│ 🌍 Country: {country_name}
+│ ⚙️ Service: {service_name}
+│ 📱 Number: {available_number}
+│ 📊 Progress: {used_count + 1}/{total_count}
+└─────────────────────────────────────┘
+"""
+        
+        # Button to get number with copy feature
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("📋 Copy Number", callback_data=f"copy_number_{country_id}_{service_id}")
+        )
+        markup.row(
+            types.InlineKeyboardButton("🔄 Change Number", callback_data=f"change_number_{country_id}_{service_id}"),
+            types.InlineKeyboardButton("🌍 Change Country", callback_data=f"back_to_country_{service_id}")
+        )
+        markup.add(
+            types.InlineKeyboardButton("⬅️ Back to Service List", callback_data="back_to_service_list")
+        )
+        
+        bot.send_message(call.message.chat.id, table_text, reply_markup=markup)
+    
+    # ---------- COPY NUMBER ----------
+    elif call.data.startswith("copy_number_"):
+        parts = call.data.split("_")
+        country_id = int(parts[2])
+        service_id = int(parts[3])
+        
+        if uid not in get_number_current:
+            bot.answer_callback_query(call.id, "⚠️ Error")
+            return
+        
+        available_number, _, _, used_count, total_count, _, _ = get_number_current[uid]
         
         # Update used count
         new_used_count = used_count + 1
@@ -410,20 +463,136 @@ def callback(call):
         """, (new_used_count, country_id, service_id))
         conn.commit()
         
-        # Send the number
-        message_text = f"""✅ NUMBER ASSIGNED
+        # Copy to clipboard message
+        copy_msg = f"""✅ NUMBER COPIED!
 
-🌍 Country: {country_name}
-⚙️ Service: {service_name}
-📱 Number: {available_number}
+📱 Number: `{available_number}`
 
-📊 Progress: {new_used_count}/{total_count} used"""
+(Number copied to clipboard via Telegram's new feature)
+📊 Progress: {new_used_count}/{total_count}"""
         
-        bot.send_message(call.message.chat.id, message_text)
-        bot.answer_callback_query(call.id, "✅ Number sent!")
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("🔄 Change Number", callback_data=f"change_number_{country_id}_{service_id}"),
+            types.InlineKeyboardButton("🌍 Change Country", callback_data=f"back_to_country_{service_id}")
+        )
+        markup.add(
+            types.InlineKeyboardButton("⬅️ Back to Service List", callback_data="back_to_service_list")
+        )
+        
+        bot.send_message(call.message.chat.id, copy_msg, reply_markup=markup, parse_mode='Markdown')
+        bot.answer_callback_query(call.id, f"✅ {available_number} copied!")
+    
+    # ---------- CHANGE NUMBER ----------
+    elif call.data.startswith("change_number_"):
+        parts = call.data.split("_")
+        country_id = int(parts[2])
+        service_id = int(parts[3])
+        
+        # Get the numbers for this country-service combo
+        cursor.execute("""
+            SELECT c.country, s.service, n.numbers, n.used_count, n.count
+            FROM numbers_upload n
+            JOIN countries c ON n.country_id = c.id
+            JOIN services s ON n.service_id = s.id
+            WHERE n.country_id = ? AND n.service_id = ?
+        """, (country_id, service_id))
+        
+        result = cursor.fetchone()
+        
+        if not result:
+            bot.answer_callback_query(call.id, "⚠️ No numbers found")
+            return
+        
+        country_name, service_name, numbers_str, used_count, total_count = result
+        numbers_list = [n.strip() for n in numbers_str.split('\n') if n.strip()]
+        
+        # Get next available number
+        available_number = numbers_list[used_count] if used_count < len(numbers_list) else None
+        
+        if not available_number:
+            bot.send_message(call.message.chat.id, "⚠️ All numbers have been used!")
+            return
+        
+        # Store current number
+        get_number_current[uid] = (available_number, country_id, service_id, used_count, total_count, country_name, service_name)
+        
+        # Create table view
+        table_text = f"""
+┌─────────────────────────────────────┐
+│ 🌍 Country: {country_name}
+│ ⚙️ Service: {service_name}
+│ 📱 Number: {available_number}
+│ 📊 Progress: {used_count + 1}/{total_count}
+└─────────────────────────────────────┘
+"""
+        
+        # Button to get number with copy feature
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("📋 Copy Number", callback_data=f"copy_number_{country_id}_{service_id}")
+        )
+        markup.row(
+            types.InlineKeyboardButton("🔄 Change Number", callback_data=f"change_number_{country_id}_{service_id}"),
+            types.InlineKeyboardButton("🌍 Change Country", callback_data=f"back_to_country_{service_id}")
+        )
+        markup.add(
+            types.InlineKeyboardButton("⬅️ Back to Service List", callback_data="back_to_service_list")
+        )
+        
+        bot.edit_message_text(table_text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+        bot.answer_callback_query(call.id, "✅ Number changed!")
+    
+    # ---------- BACK TO COUNTRY LIST ----------
+    elif call.data.startswith("back_to_country_"):
+        service_id = int(call.data.split("_")[-1])
+        
+        # Show countries that have numbers for this service
+        cursor.execute("""
+            SELECT DISTINCT c.id, c.country 
+            FROM countries c
+            JOIN numbers_upload n ON c.id = n.country_id
+            WHERE n.service_id = ? AND n.count > 0
+        """, (service_id,))
+        
+        countries = cursor.fetchall()
+        
+        if not countries:
+            bot.answer_callback_query(call.id, "⚠️ No countries available")
+            return
+        
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for country_id, country_name in countries:
+            markup.add(types.InlineKeyboardButton(f"🌍 {country_name}", callback_data=f"get_select_country_{country_id}_{service_id}"))
+        
+        markup.add(types.InlineKeyboardButton("⬅️ Back to Service List", callback_data="back_to_service_list"))
+        
+        bot.edit_message_text("🌍 Select Country:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    
+    # ---------- BACK TO SERVICE LIST ----------
+    elif call.data == "back_to_service_list":
+        cursor.execute("SELECT id, service FROM services")
+        services = cursor.fetchall()
+        
+        if not services:
+            bot.send_message(call.message.chat.id, "⚠️ No services available")
+            return
+        
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for service_id, service_name in services:
+            cursor.execute("""
+                SELECT COUNT(*) FROM numbers_upload 
+                WHERE service_id = ? AND count > 0
+            """, (service_id,))
+            
+            count = cursor.fetchone()[0]
+            if count > 0:
+                markup.add(types.InlineKeyboardButton(f"⚙️ {service_name}", callback_data=f"get_select_service_{service_id}"))
+        
+        bot.edit_message_text("⚙️ Select Service:", call.message.chat.id, call.message.message_id, reply_markup=markup)
     
     # Admin section - check permission
-    if uid not in ADMIN_IDS and not call.data.startswith("get_"):
+    if uid not in ADMIN_IDS and not call.data.startswith("get_") and not call.data.startswith("copy_") and not call.data.startswith("change_") and not call.data.startswith("back_"):
         bot.answer_callback_query(call.id, "⛔ No permission")
         return
     
@@ -694,5 +863,5 @@ def callback(call):
 
 
 # ================= RUN =================
-print("🚀 BOT RUNNING - GET NUMBER FEATURE ACTIVE")
+print("🚀 BOT RUNNING - FULL FEATURED GET NUMBER SYSTEM ACTIVE")
 bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=20)
