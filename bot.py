@@ -2,6 +2,7 @@ import telebot
 from telebot import types
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+import threading
 
 TOKEN = "8721478017:AAHIDuAOV0TRUT7iJTdtxOUF18Zh-wupPwE"
 
@@ -16,38 +17,40 @@ ADMIN_IDS = [8364889419]
 # ================= DATABASE =================
 conn = sqlite3.connect("bot.db", check_same_thread=False)
 cursor = conn.cursor()
+db_lock = threading.Lock()
 
 # Create tables
 def init_db():
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS countries (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        country TEXT UNIQUE,
-        numbers TEXT DEFAULT ''
-    )
-    """)
-    
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS services (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        service TEXT UNIQUE,
-        numbers TEXT DEFAULT ''
-    )
-    """)
-    
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS numbers_upload (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        country_id INTEGER,
-        service_id INTEGER,
-        numbers TEXT,
-        count INTEGER,
-        used_count INTEGER DEFAULT 0,
-        UNIQUE(country_id, service_id)
-    )
-    """)
-    
-    conn.commit()
+    with db_lock:
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS countries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            country TEXT UNIQUE,
+            numbers TEXT DEFAULT ''
+        )
+        """)
+        
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS services (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            service TEXT UNIQUE,
+            numbers TEXT DEFAULT ''
+        )
+        """)
+        
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS numbers_upload (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            country_id INTEGER,
+            service_id INTEGER,
+            numbers TEXT,
+            count INTEGER,
+            used_count INTEGER DEFAULT 0,
+            UNIQUE(country_id, service_id)
+        )
+        """)
+        
+        conn.commit()
 
 init_db()
 
@@ -127,8 +130,9 @@ def handle(m):
     
     # ---------- USER ----------
     if text == "📱 GET NUMBER":
-        cursor.execute("SELECT id, service FROM services")
-        services = cursor.fetchall()
+        with db_lock:
+            cursor.execute("SELECT id, service FROM services")
+            services = cursor.fetchall()
         
         if not services:
             bot.send_message(m.chat.id, "⚠️ No services available")
@@ -137,12 +141,13 @@ def handle(m):
         markup = types.InlineKeyboardMarkup(row_width=1)
         for service_id, service_name in services:
             # Check if service has any numbers
-            cursor.execute("""
-                SELECT COUNT(*) FROM numbers_upload 
-                WHERE service_id = ? AND count > 0
-            """, (service_id,))
-            
-            count = cursor.fetchone()[0]
+            with db_lock:
+                cursor.execute("""
+                    SELECT COUNT(*) FROM numbers_upload 
+                    WHERE service_id = ? AND count > 0
+                """, (service_id,))
+                
+                count = cursor.fetchone()[0]
             if count > 0:
                 markup.add(types.InlineKeyboardButton(f"⚙️ {service_name}", callback_data=f"get_select_service_{service_id}"))
         
@@ -190,8 +195,9 @@ def handle(m):
             return
         
         try:
-            cursor.execute("INSERT INTO countries (country, numbers) VALUES (?, ?)", (country, ''))
-            conn.commit()
+            with db_lock:
+                cursor.execute("INSERT INTO countries (country, numbers) VALUES (?, ?)", (country, ''))
+                conn.commit()
             bot.send_message(m.chat.id, f"✅ Country Saved: {country}")
         except sqlite3.IntegrityError:
             bot.send_message(m.chat.id, "⚠️ Country already exists")
@@ -211,8 +217,9 @@ def handle(m):
             return
         
         try:
-            cursor.execute("UPDATE countries SET country = ? WHERE id = ?", (new_country_name, country_id))
-            conn.commit()
+            with db_lock:
+                cursor.execute("UPDATE countries SET country = ? WHERE id = ?", (new_country_name, country_id))
+                conn.commit()
             bot.send_message(m.chat.id, f"✅ Country Updated: {new_country_name}")
         except sqlite3.IntegrityError:
             bot.send_message(m.chat.id, "⚠️ Country name already exists")
@@ -231,8 +238,9 @@ def handle(m):
             return
         
         try:
-            cursor.execute("INSERT INTO services (service, numbers) VALUES (?, ?)", (service, ''))
-            conn.commit()
+            with db_lock:
+                cursor.execute("INSERT INTO services (service, numbers) VALUES (?, ?)", (service, ''))
+                conn.commit()
             bot.send_message(m.chat.id, f"✅ Service Added: {service}")
         except sqlite3.IntegrityError:
             bot.send_message(m.chat.id, "⚠️ Service already exists")
@@ -252,8 +260,9 @@ def handle(m):
             return
         
         try:
-            cursor.execute("UPDATE services SET service = ? WHERE id = ?", (new_service_name, service_id))
-            conn.commit()
+            with db_lock:
+                cursor.execute("UPDATE services SET service = ? WHERE id = ?", (new_service_name, service_id))
+                conn.commit()
             bot.send_message(m.chat.id, f"✅ Service Updated: {new_service_name}")
         except sqlite3.IntegrityError:
             bot.send_message(m.chat.id, "⚠️ Service name already exists")
@@ -302,12 +311,13 @@ def handle_file(message):
         country_id = upload_flow_country[uid]
         service_id = upload_flow_service[uid]
         
-        cursor.execute("SELECT country FROM countries WHERE id = ?", (country_id,))
-        country_result = cursor.fetchone()
-        country_name = country_result[0] if country_result else "Unknown"
+        with db_lock:
+            cursor.execute("SELECT country FROM countries WHERE id = ?", (country_id,))
+            country_result = cursor.fetchone()
+            cursor.execute("SELECT service FROM services WHERE id = ?", (service_id,))
+            service_result = cursor.fetchone()
         
-        cursor.execute("SELECT service FROM services WHERE id = ?", (service_id,))
-        service_result = cursor.fetchone()
+        country_name = country_result[0] if country_result else "Unknown"
         service_name = service_result[0] if service_result else "Unknown"
         
         # Create preview
@@ -348,248 +358,251 @@ def callback(call):
     
     # ---------- GET NUMBER - SELECT SERVICE ----------
     if call.data.startswith("get_select_service_"):
-        service_id = int(call.data.split("_")[-1])
-        get_number_service[uid] = service_id
-        
-        # Get service name
-        cursor.execute("SELECT service FROM services WHERE id = ?", (service_id,))
-        service_result = cursor.fetchone()
-        service_name = service_result[0] if service_result else "Unknown"
-        
-        # Show countries that have numbers for this service
-        cursor.execute("""
-            SELECT DISTINCT c.id, c.country 
-            FROM countries c
-            JOIN numbers_upload n ON c.id = n.country_id
-            WHERE n.service_id = ? AND n.count > 0
-        """, (service_id,))
-        
-        countries = cursor.fetchall()
-        
-        if not countries:
-            bot.answer_callback_query(call.id, "⚠️ No numbers available for this service")
-            return
-        
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        for country_id, country_name in countries:
-            markup.add(types.InlineKeyboardButton(f"🌍 {country_name}", callback_data=f"get_select_country_{country_id}_{service_id}"))
-        
-        bot.edit_message_text("🌍 Select Country:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        try:
+            service_id = int(call.data.split("_")[-1])
+            get_number_service[uid] = service_id
+            
+            # Get service name
+            with db_lock:
+                cursor.execute("SELECT service FROM services WHERE id = ?", (service_id,))
+                service_result = cursor.fetchone()
+                cursor.execute("""
+                    SELECT DISTINCT c.id, c.country 
+                    FROM countries c
+                    JOIN numbers_upload n ON c.id = n.country_id
+                    WHERE n.service_id = ? AND n.count > 0
+                """, (service_id,))
+                countries = cursor.fetchall()
+            
+            service_name = service_result[0] if service_result else "Unknown"
+            
+            if not countries:
+                bot.answer_callback_query(call.id, "⚠️ No numbers available for this service")
+                return
+            
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            for country_id, country_name in countries:
+                markup.add(types.InlineKeyboardButton(f"🌍 {country_name}", callback_data=f"get_select_country_{country_id}_{service_id}"))
+            
+            bot.edit_message_text("🌍 Select Country:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        except Exception as e:
+            bot.answer_callback_query(call.id, f"Error: {str(e)}")
     
     # ---------- GET NUMBER - SELECT COUNTRY & SHOW TABLE ----------
     elif call.data.startswith("get_select_country_"):
-        parts = call.data.split("_")
-        country_id = int(parts[3])
-        service_id = int(parts[4])
-        
-        get_number_country[uid] = country_id
-        get_number_service[uid] = service_id
-        
-        # Get the numbers for this country-service combo
-        cursor.execute("""
-            SELECT c.country, s.service, n.numbers, n.used_count, n.count
-            FROM numbers_upload n
-            JOIN countries c ON n.country_id = c.id
-            JOIN services s ON n.service_id = s.id
-            WHERE n.country_id = ? AND n.service_id = ?
-        """, (country_id, service_id))
-        
-        result = cursor.fetchone()
-        
-        if not result:
-            bot.answer_callback_query(call.id, "⚠️ No numbers found")
-            return
-        
-        country_name, service_name, numbers_str, used_count, total_count = result
-        numbers_list = [n.strip() for n in numbers_str.split('\n') if n.strip()]
-        
-        if not numbers_list:
-            bot.answer_callback_query(call.id, "⚠️ No numbers available")
-            return
-        
-        # Get next available number
-        available_number = numbers_list[used_count] if used_count < len(numbers_list) else None
-        
-        if not available_number:
-            bot.send_message(call.message.chat.id, "⚠️ All numbers have been used for this country-service combo")
-            return
-        
-        # Store current number
-        get_number_current[uid] = (available_number, country_id, service_id, used_count, total_count, country_name, service_name)
-        
-        # Create table view
-        table_text = f"""
-┌─────────────────────────────────────┐
-│ 🌍 Country: {country_name}
-│ ⚙️ Service: {service_name}
-│ 📱 Number: {available_number}
-│ 📊 Progress: {used_count + 1}/{total_count}
-└─────────────────────────────────────┘
-"""
-        
-        # Button to get number with copy feature
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("📋 Copy Number", callback_data=f"copy_number_{country_id}_{service_id}")
-        )
-        markup.row(
-            types.InlineKeyboardButton("🔄 Change Number", callback_data=f"change_number_{country_id}_{service_id}"),
-            types.InlineKeyboardButton("🌍 Change Country", callback_data=f"back_to_country_{service_id}")
-        )
-        markup.add(
-            types.InlineKeyboardButton("⬅️ Back to Service List", callback_data="back_to_service_list")
-        )
-        
-        bot.send_message(call.message.chat.id, table_text, reply_markup=markup)
+        try:
+            parts = call.data.split("_")
+            country_id = int(parts[3])
+            service_id = int(parts[4])
+            
+            get_number_country[uid] = country_id
+            get_number_service[uid] = service_id
+            
+            # Get the numbers for this country-service combo
+            with db_lock:
+                cursor.execute("""
+                    SELECT c.country, s.service, n.numbers, n.used_count, n.count
+                    FROM numbers_upload n
+                    JOIN countries c ON n.country_id = c.id
+                    JOIN services s ON n.service_id = s.id
+                    WHERE n.country_id = ? AND n.service_id = ?
+                """, (country_id, service_id))
+                result = cursor.fetchone()
+            
+            if not result:
+                bot.answer_callback_query(call.id, "⚠️ No numbers found")
+                return
+            
+            country_name, service_name, numbers_str, used_count, total_count = result
+            numbers_list = [n.strip() for n in numbers_str.split('\n') if n.strip()]
+            
+            if not numbers_list or used_count >= len(numbers_list):
+                bot.send_message(call.message.chat.id, "⚠️ All numbers have been used for this country-service combo")
+                return
+            
+            # Get next available number
+            available_number = numbers_list[used_count]
+            
+            # Store current number
+            get_number_current[uid] = (available_number, country_id, service_id, used_count, total_count, country_name, service_name)
+            
+            # Create table view
+            table_text = f"""
+┌─────────────────────────────────┐
+│  🌍 Country: {country_name}
+│  ⚙️ Service: {service_name}
+│  📱 Number: `{available_number}`
+│  📊 Progress: {used_count + 1}/{total_count}
+└─────────────────────────────────┘"""
+            
+            # Button to get number with copy feature
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            markup.add(types.InlineKeyboardButton("📋 Copy Number", callback_data=f"copy_number_{country_id}_{service_id}"))
+            markup.row(
+                types.InlineKeyboardButton("🔄 Change Number", callback_data=f"change_number_{country_id}_{service_id}"),
+                types.InlineKeyboardButton("🌍 Change Country", callback_data=f"back_to_country_{service_id}")
+            )
+            markup.add(types.InlineKeyboardButton("⬅️ Back to Service List", callback_data="back_to_service_list"))
+            
+            bot.send_message(call.message.chat.id, table_text, reply_markup=markup, parse_mode='Markdown')
+        except Exception as e:
+            bot.answer_callback_query(call.id, f"Error: {str(e)}")
     
     # ---------- COPY NUMBER ----------
     elif call.data.startswith("copy_number_"):
-        parts = call.data.split("_")
-        country_id = int(parts[2])
-        service_id = int(parts[3])
-        
-        if uid not in get_number_current:
-            bot.answer_callback_query(call.id, "⚠️ Error")
-            return
-        
-        available_number, _, _, used_count, total_count, _, _ = get_number_current[uid]
-        
-        # Update used count
-        new_used_count = used_count + 1
-        cursor.execute("""
-            UPDATE numbers_upload 
-            SET used_count = ? 
-            WHERE country_id = ? AND service_id = ?
-        """, (new_used_count, country_id, service_id))
-        conn.commit()
-        
-        # Copy to clipboard message
-        copy_msg = f"""✅ NUMBER COPIED!
+        try:
+            parts = call.data.split("_")
+            country_id = int(parts[2])
+            service_id = int(parts[3])
+            
+            if uid not in get_number_current:
+                bot.answer_callback_query(call.id, "⚠️ Error")
+                return
+            
+            available_number, _, _, used_count, total_count, _, _ = get_number_current[uid]
+            
+            # Update used count
+            new_used_count = used_count + 1
+            with db_lock:
+                cursor.execute("""
+                    UPDATE numbers_upload 
+                    SET used_count = ? 
+                    WHERE country_id = ? AND service_id = ?
+                """, (new_used_count, country_id, service_id))
+                conn.commit()
+            
+            # Copy to clipboard message
+            copy_msg = f"""✅ NUMBER COPIED!
 
 📱 Number: `{available_number}`
 
-(Number copied to clipboard via Telegram's new feature)
 📊 Progress: {new_used_count}/{total_count}"""
-        
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("🔄 Change Number", callback_data=f"change_number_{country_id}_{service_id}"),
-            types.InlineKeyboardButton("🌍 Change Country", callback_data=f"back_to_country_{service_id}")
-        )
-        markup.add(
-            types.InlineKeyboardButton("⬅️ Back to Service List", callback_data="back_to_service_list")
-        )
-        
-        bot.send_message(call.message.chat.id, copy_msg, reply_markup=markup, parse_mode='Markdown')
-        bot.answer_callback_query(call.id, f"✅ {available_number} copied!")
+            
+            markup = types.InlineKeyboardMarkup(row_width=2)
+            markup.add(
+                types.InlineKeyboardButton("🔄 Change Number", callback_data=f"change_number_{country_id}_{service_id}"),
+                types.InlineKeyboardButton("🌍 Change Country", callback_data=f"back_to_country_{service_id}")
+            )
+            markup.add(types.InlineKeyboardButton("⬅️ Back to Service List", callback_data="back_to_service_list"))
+            
+            bot.send_message(call.message.chat.id, copy_msg, reply_markup=markup, parse_mode='Markdown')
+            bot.answer_callback_query(call.id, f"✅ {available_number} copied!")
+        except Exception as e:
+            bot.answer_callback_query(call.id, f"Error: {str(e)}")
     
     # ---------- CHANGE NUMBER ----------
     elif call.data.startswith("change_number_"):
-        parts = call.data.split("_")
-        country_id = int(parts[2])
-        service_id = int(parts[3])
-        
-        # Get the numbers for this country-service combo
-        cursor.execute("""
-            SELECT c.country, s.service, n.numbers, n.used_count, n.count
-            FROM numbers_upload n
-            JOIN countries c ON n.country_id = c.id
-            JOIN services s ON n.service_id = s.id
-            WHERE n.country_id = ? AND n.service_id = ?
-        """, (country_id, service_id))
-        
-        result = cursor.fetchone()
-        
-        if not result:
-            bot.answer_callback_query(call.id, "⚠️ No numbers found")
-            return
-        
-        country_name, service_name, numbers_str, used_count, total_count = result
-        numbers_list = [n.strip() for n in numbers_str.split('\n') if n.strip()]
-        
-        # Get next available number
-        available_number = numbers_list[used_count] if used_count < len(numbers_list) else None
-        
-        if not available_number:
-            bot.send_message(call.message.chat.id, "⚠️ All numbers have been used!")
-            return
-        
-        # Store current number
-        get_number_current[uid] = (available_number, country_id, service_id, used_count, total_count, country_name, service_name)
-        
-        # Create table view
-        table_text = f"""
-┌─────────────────────────────────────┐
-│ 🌍 Country: {country_name}
-│ ⚙️ Service: {service_name}
-│ 📱 Number: {available_number}
-│ 📊 Progress: {used_count + 1}/{total_count}
-└─────────────────────────────────────┘
-"""
-        
-        # Button to get number with copy feature
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("📋 Copy Number", callback_data=f"copy_number_{country_id}_{service_id}")
-        )
-        markup.row(
-            types.InlineKeyboardButton("🔄 Change Number", callback_data=f"change_number_{country_id}_{service_id}"),
-            types.InlineKeyboardButton("🌍 Change Country", callback_data=f"back_to_country_{service_id}")
-        )
-        markup.add(
-            types.InlineKeyboardButton("⬅️ Back to Service List", callback_data="back_to_service_list")
-        )
-        
-        bot.edit_message_text(table_text, call.message.chat.id, call.message.message_id, reply_markup=markup)
-        bot.answer_callback_query(call.id, "✅ Number changed!")
+        try:
+            parts = call.data.split("_")
+            country_id = int(parts[2])
+            service_id = int(parts[3])
+            
+            # Get the numbers for this country-service combo
+            with db_lock:
+                cursor.execute("""
+                    SELECT c.country, s.service, n.numbers, n.used_count, n.count
+                    FROM numbers_upload n
+                    JOIN countries c ON n.country_id = c.id
+                    JOIN services s ON n.service_id = s.id
+                    WHERE n.country_id = ? AND n.service_id = ?
+                """, (country_id, service_id))
+                result = cursor.fetchone()
+            
+            if not result:
+                bot.answer_callback_query(call.id, "⚠️ No numbers found")
+                return
+            
+            country_name, service_name, numbers_str, used_count, total_count = result
+            numbers_list = [n.strip() for n in numbers_str.split('\n') if n.strip()]
+            
+            if used_count >= len(numbers_list):
+                bot.send_message(call.message.chat.id, "⚠️ All numbers have been used!")
+                return
+            
+            # Get next available number
+            available_number = numbers_list[used_count]
+            
+            # Store current number
+            get_number_current[uid] = (available_number, country_id, service_id, used_count, total_count, country_name, service_name)
+            
+            # Create table view
+            table_text = f"""
+┌─────────────────────────────────┐
+│  🌍 Country: {country_name}
+│  ⚙️ Service: {service_name}
+│  📱 Number: `{available_number}`
+│  📊 Progress: {used_count + 1}/{total_count}
+└─────────────────────────────────┘"""
+            
+            # Button to get number with copy feature
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            markup.add(types.InlineKeyboardButton("📋 Copy Number", callback_data=f"copy_number_{country_id}_{service_id}"))
+            markup.row(
+                types.InlineKeyboardButton("🔄 Change Number", callback_data=f"change_number_{country_id}_{service_id}"),
+                types.InlineKeyboardButton("🌍 Change Country", callback_data=f"back_to_country_{service_id}")
+            )
+            markup.add(types.InlineKeyboardButton("⬅️ Back to Service List", callback_data="back_to_service_list"))
+            
+            bot.edit_message_text(table_text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode='Markdown')
+            bot.answer_callback_query(call.id, "✅ Number changed!")
+        except Exception as e:
+            bot.answer_callback_query(call.id, f"Error: {str(e)}")
     
     # ---------- BACK TO COUNTRY LIST ----------
     elif call.data.startswith("back_to_country_"):
-        service_id = int(call.data.split("_")[-1])
-        
-        # Show countries that have numbers for this service
-        cursor.execute("""
-            SELECT DISTINCT c.id, c.country 
-            FROM countries c
-            JOIN numbers_upload n ON c.id = n.country_id
-            WHERE n.service_id = ? AND n.count > 0
-        """, (service_id,))
-        
-        countries = cursor.fetchall()
-        
-        if not countries:
-            bot.answer_callback_query(call.id, "⚠️ No countries available")
-            return
-        
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        for country_id, country_name in countries:
-            markup.add(types.InlineKeyboardButton(f"🌍 {country_name}", callback_data=f"get_select_country_{country_id}_{service_id}"))
-        
-        markup.add(types.InlineKeyboardButton("⬅️ Back to Service List", callback_data="back_to_service_list"))
-        
-        bot.edit_message_text("🌍 Select Country:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        try:
+            service_id = int(call.data.split("_")[-1])
+            
+            # Show countries that have numbers for this service
+            with db_lock:
+                cursor.execute("""
+                    SELECT DISTINCT c.id, c.country 
+                    FROM countries c
+                    JOIN numbers_upload n ON c.id = n.country_id
+                    WHERE n.service_id = ? AND n.count > 0
+                """, (service_id,))
+                countries = cursor.fetchall()
+            
+            if not countries:
+                bot.answer_callback_query(call.id, "⚠️ No countries available")
+                return
+            
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            for country_id, country_name in countries:
+                markup.add(types.InlineKeyboardButton(f"🌍 {country_name}", callback_data=f"get_select_country_{country_id}_{service_id}"))
+            
+            markup.add(types.InlineKeyboardButton("⬅️ Back to Service List", callback_data="back_to_service_list"))
+            
+            bot.edit_message_text("🌍 Select Country:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        except Exception as e:
+            bot.answer_callback_query(call.id, f"Error: {str(e)}")
     
     # ---------- BACK TO SERVICE LIST ----------
     elif call.data == "back_to_service_list":
-        cursor.execute("SELECT id, service FROM services")
-        services = cursor.fetchall()
-        
-        if not services:
-            bot.send_message(call.message.chat.id, "⚠️ No services available")
-            return
-        
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        for service_id, service_name in services:
-            cursor.execute("""
-                SELECT COUNT(*) FROM numbers_upload 
-                WHERE service_id = ? AND count > 0
-            """, (service_id,))
+        try:
+            with db_lock:
+                cursor.execute("SELECT id, service FROM services")
+                services = cursor.fetchall()
             
-            count = cursor.fetchone()[0]
-            if count > 0:
-                markup.add(types.InlineKeyboardButton(f"⚙️ {service_name}", callback_data=f"get_select_service_{service_id}"))
-        
-        bot.edit_message_text("⚙️ Select Service:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+            if not services:
+                bot.send_message(call.message.chat.id, "⚠️ No services available")
+                return
+            
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            for service_id, service_name in services:
+                with db_lock:
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM numbers_upload 
+                        WHERE service_id = ? AND count > 0
+                    """, (service_id,))
+                    count = cursor.fetchone()[0]
+                
+                if count > 0:
+                    markup.add(types.InlineKeyboardButton(f"⚙️ {service_name}", callback_data=f"get_select_service_{service_id}"))
+            
+            bot.edit_message_text("⚙️ Select Service:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        except Exception as e:
+            bot.answer_callback_query(call.id, f"Error: {str(e)}")
     
     # Admin section - check permission
     if uid not in ADMIN_IDS and not call.data.startswith("get_") and not call.data.startswith("copy_") and not call.data.startswith("change_") and not call.data.startswith("back_"):
@@ -608,8 +621,9 @@ def callback(call):
     
     # ---------- COUNTRY BOARD ----------
     elif call.data == "country_board":
-        cursor.execute("SELECT id, country FROM countries")
-        rows = cursor.fetchall()
+        with db_lock:
+            cursor.execute("SELECT id, country FROM countries")
+            rows = cursor.fetchall()
         
         if not rows:
             bot.send_message(call.message.chat.id, "📊 No countries")
@@ -624,33 +638,38 @@ def callback(call):
     
     # ---------- COUNTRY OPTIONS ----------
     elif call.data.startswith("country_options_"):
-        country_id = int(call.data.split("_")[-1])
-        cursor.execute("SELECT country FROM countries WHERE id = ?", (country_id,))
-        result = cursor.fetchone()
-        
-        if not result:
-            bot.answer_callback_query(call.id, "Country not found")
-            return
-        
-        country_name = result[0]
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        markup.add(
-            types.InlineKeyboardButton("✏️ Edit", callback_data=f"edit_country_{country_id}"),
-            types.InlineKeyboardButton("🗑️ Delete", callback_data=f"delete_country_{country_id}"),
-            types.InlineKeyboardButton("📤 Upload Numbers", callback_data=f"upload_country_{country_id}"),
-            types.InlineKeyboardButton("🔄 Clear Numbers", callback_data=f"clear_country_{country_id}"),
-            types.InlineKeyboardButton("⬅️ Back", callback_data="country_board")
-        )
-        
-        bot.edit_message_text(f"🌍 {country_name}\n\nSelect Action:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        try:
+            country_id = int(call.data.split("_")[-1])
+            with db_lock:
+                cursor.execute("SELECT country FROM countries WHERE id = ?", (country_id,))
+                result = cursor.fetchone()
+            
+            if not result:
+                bot.answer_callback_query(call.id, "Country not found")
+                return
+            
+            country_name = result[0]
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            markup.add(
+                types.InlineKeyboardButton("✏️ Edit", callback_data=f"edit_country_{country_id}"),
+                types.InlineKeyboardButton("🗑️ Delete", callback_data=f"delete_country_{country_id}"),
+                types.InlineKeyboardButton("📤 Upload Numbers", callback_data=f"upload_country_{country_id}"),
+                types.InlineKeyboardButton("🔄 Clear Numbers", callback_data=f"clear_country_{country_id}"),
+                types.InlineKeyboardButton("⬅️ Back", callback_data="country_board")
+            )
+            
+            bot.edit_message_text(f"🌍 {country_name}\n\nSelect Action:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        except Exception as e:
+            bot.answer_callback_query(call.id, f"Error: {str(e)}")
     
     # ---------- DELETE COUNTRY ----------
     elif call.data.startswith("delete_country_"):
-        country_id = int(call.data.split("_")[-1])
         try:
-            cursor.execute("DELETE FROM countries WHERE id = ?", (country_id,))
-            cursor.execute("DELETE FROM numbers_upload WHERE country_id = ?", (country_id,))
-            conn.commit()
+            country_id = int(call.data.split("_")[-1])
+            with db_lock:
+                cursor.execute("DELETE FROM countries WHERE id = ?", (country_id,))
+                cursor.execute("DELETE FROM numbers_upload WHERE country_id = ?", (country_id,))
+                conn.commit()
             bot.answer_callback_query(call.id, "✅ Country Deleted")
             bot.edit_message_text("✅ Country deleted!", call.message.chat.id, call.message.message_id)
         except Exception as e:
@@ -658,34 +677,44 @@ def callback(call):
     
     # ---------- EDIT COUNTRY ----------
     elif call.data.startswith("edit_country_"):
-        country_id = int(call.data.split("_")[-1])
-        editing_country_id[uid] = country_id
-        bot.send_message(call.message.chat.id, "🌍 Send new country name:")
+        try:
+            country_id = int(call.data.split("_")[-1])
+            editing_country_id[uid] = country_id
+            bot.send_message(call.message.chat.id, "🌍 Send new country name:")
+        except Exception as e:
+            bot.answer_callback_query(call.id, f"Error: {str(e)}")
     
     # ---------- UPLOAD COUNTRY NUMBERS ----------
     elif call.data.startswith("upload_country_"):
-        country_id = int(call.data.split("_")[-1])
-        upload_flow_country[uid] = country_id
-        
-        cursor.execute("SELECT id, service FROM services")
-        services = cursor.fetchall()
-        
-        if not services:
-            bot.send_message(call.message.chat.id, "⚠️ Add services first")
-            upload_flow_country.pop(uid, None)
-            return
-        
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        for service_id, service_name in services:
-            markup.add(types.InlineKeyboardButton(f"⚙️ {service_name}", callback_data=f"select_service_for_upload_{service_id}"))
-        
-        bot.send_message(call.message.chat.id, "⚙️ Select Service:", reply_markup=markup)
+        try:
+            country_id = int(call.data.split("_")[-1])
+            upload_flow_country[uid] = country_id
+            
+            with db_lock:
+                cursor.execute("SELECT id, service FROM services")
+                services = cursor.fetchall()
+            
+            if not services:
+                bot.send_message(call.message.chat.id, "⚠️ Add services first")
+                upload_flow_country.pop(uid, None)
+                return
+            
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            for service_id, service_name in services:
+                markup.add(types.InlineKeyboardButton(f"⚙️ {service_name}", callback_data=f"select_service_for_upload_{service_id}"))
+            
+            bot.send_message(call.message.chat.id, "⚙️ Select Service:", reply_markup=markup)
+        except Exception as e:
+            bot.answer_callback_query(call.id, f"Error: {str(e)}")
     
     # ---------- SELECT SERVICE FOR UPLOAD ----------
     elif call.data.startswith("select_service_for_upload_"):
-        service_id = int(call.data.split("_")[-1])
-        upload_flow_service[uid] = service_id
-        bot.send_message(call.message.chat.id, "📄 Send .txt file\n\nNumbers format:\n- One per line\n- Or comma separated")
+        try:
+            service_id = int(call.data.split("_")[-1])
+            upload_flow_service[uid] = service_id
+            bot.send_message(call.message.chat.id, "📄 Send .txt file\n\nNumbers format:\n- One per line\n- Or comma separated")
+        except Exception as e:
+            bot.answer_callback_query(call.id, f"Error: {str(e)}")
     
     # ---------- CONFIRM AND SAVE UPLOAD ----------
     elif call.data.startswith("confirm_upload_"):
@@ -701,17 +730,18 @@ def callback(call):
             numbers_list = upload_flow_numbers[uid]
             numbers_str = "\n".join(numbers_list)
             
-            cursor.execute("SELECT id FROM numbers_upload WHERE country_id = ? AND service_id = ?", (country_id, service_id))
-            existing = cursor.fetchone()
-            
-            if existing:
-                cursor.execute("UPDATE numbers_upload SET numbers = ?, count = ?, used_count = 0 WHERE country_id = ? AND service_id = ?", 
-                             (numbers_str, len(numbers_list), country_id, service_id))
-            else:
-                cursor.execute("INSERT INTO numbers_upload (country_id, service_id, numbers, count, used_count) VALUES (?, ?, ?, ?, ?)",
-                             (country_id, service_id, numbers_str, len(numbers_list), 0))
-            
-            conn.commit()
+            with db_lock:
+                cursor.execute("SELECT id FROM numbers_upload WHERE country_id = ? AND service_id = ?", (country_id, service_id))
+                existing = cursor.fetchone()
+                
+                if existing:
+                    cursor.execute("UPDATE numbers_upload SET numbers = ?, count = ?, used_count = 0 WHERE country_id = ? AND service_id = ?", 
+                                 (numbers_str, len(numbers_list), country_id, service_id))
+                else:
+                    cursor.execute("INSERT INTO numbers_upload (country_id, service_id, numbers, count, used_count) VALUES (?, ?, ?, ?, ?)",
+                                 (country_id, service_id, numbers_str, len(numbers_list), 0))
+                
+                conn.commit()
             
             bot.edit_message_text(f"✅ Saved Successfully!\n\n📊 Total: {len(numbers_list)} numbers", 
                                  call.message.chat.id, call.message.message_id)
@@ -725,17 +755,21 @@ def callback(call):
     
     # ---------- CANCEL UPLOAD ----------
     elif call.data == "cancel_upload":
-        upload_flow_country.pop(uid, None)
-        upload_flow_service.pop(uid, None)
-        upload_flow_numbers.pop(uid, None)
-        bot.edit_message_text("❌ Cancelled", call.message.chat.id, call.message.message_id)
+        try:
+            upload_flow_country.pop(uid, None)
+            upload_flow_service.pop(uid, None)
+            upload_flow_numbers.pop(uid, None)
+            bot.edit_message_text("❌ Cancelled", call.message.chat.id, call.message.message_id)
+        except Exception as e:
+            bot.answer_callback_query(call.id, f"Error: {str(e)}")
     
     # ---------- CLEAR COUNTRY NUMBERS ----------
     elif call.data.startswith("clear_country_"):
-        country_id = int(call.data.split("_")[-1])
         try:
-            cursor.execute("DELETE FROM numbers_upload WHERE country_id = ?", (country_id,))
-            conn.commit()
+            country_id = int(call.data.split("_")[-1])
+            with db_lock:
+                cursor.execute("DELETE FROM numbers_upload WHERE country_id = ?", (country_id,))
+                conn.commit()
             bot.answer_callback_query(call.id, "✅ Cleared")
             bot.edit_message_text("✅ Numbers cleared!", call.message.chat.id, call.message.message_id)
         except Exception as e:
@@ -743,8 +777,9 @@ def callback(call):
     
     # ---------- SERVICE BOARD ----------
     elif call.data == "service_board":
-        cursor.execute("SELECT id, service FROM services")
-        rows = cursor.fetchall()
+        with db_lock:
+            cursor.execute("SELECT id, service FROM services")
+            rows = cursor.fetchall()
         
         if not rows:
             bot.send_message(call.message.chat.id, "⚙️ No services")
@@ -759,33 +794,38 @@ def callback(call):
     
     # ---------- SERVICE OPTIONS ----------
     elif call.data.startswith("service_options_"):
-        service_id = int(call.data.split("_")[-1])
-        cursor.execute("SELECT service FROM services WHERE id = ?", (service_id,))
-        result = cursor.fetchone()
-        
-        if not result:
-            bot.answer_callback_query(call.id, "Service not found")
-            return
-        
-        service_name = result[0]
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        markup.add(
-            types.InlineKeyboardButton("✏️ Edit", callback_data=f"edit_service_{service_id}"),
-            types.InlineKeyboardButton("🗑️ Delete", callback_data=f"delete_service_{service_id}"),
-            types.InlineKeyboardButton("📤 Upload Numbers", callback_data=f"upload_service_{service_id}"),
-            types.InlineKeyboardButton("🔄 Clear Numbers", callback_data=f"clear_service_{service_id}"),
-            types.InlineKeyboardButton("⬅️ Back", callback_data="service_board")
-        )
-        
-        bot.edit_message_text(f"⚙️ {service_name}\n\nSelect Action:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        try:
+            service_id = int(call.data.split("_")[-1])
+            with db_lock:
+                cursor.execute("SELECT service FROM services WHERE id = ?", (service_id,))
+                result = cursor.fetchone()
+            
+            if not result:
+                bot.answer_callback_query(call.id, "Service not found")
+                return
+            
+            service_name = result[0]
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            markup.add(
+                types.InlineKeyboardButton("✏️ Edit", callback_data=f"edit_service_{service_id}"),
+                types.InlineKeyboardButton("🗑️ Delete", callback_data=f"delete_service_{service_id}"),
+                types.InlineKeyboardButton("📤 Upload Numbers", callback_data=f"upload_service_{service_id}"),
+                types.InlineKeyboardButton("🔄 Clear Numbers", callback_data=f"clear_service_{service_id}"),
+                types.InlineKeyboardButton("⬅️ Back", callback_data="service_board")
+            )
+            
+            bot.edit_message_text(f"⚙️ {service_name}\n\nSelect Action:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        except Exception as e:
+            bot.answer_callback_query(call.id, f"Error: {str(e)}")
     
     # ---------- DELETE SERVICE ----------
     elif call.data.startswith("delete_service_"):
-        service_id = int(call.data.split("_")[-1])
         try:
-            cursor.execute("DELETE FROM services WHERE id = ?", (service_id,))
-            cursor.execute("DELETE FROM numbers_upload WHERE service_id = ?", (service_id,))
-            conn.commit()
+            service_id = int(call.data.split("_")[-1])
+            with db_lock:
+                cursor.execute("DELETE FROM services WHERE id = ?", (service_id,))
+                cursor.execute("DELETE FROM numbers_upload WHERE service_id = ?", (service_id,))
+                conn.commit()
             bot.answer_callback_query(call.id, "✅ Service Deleted")
             bot.edit_message_text("✅ Service deleted!", call.message.chat.id, call.message.message_id)
         except Exception as e:
@@ -793,41 +833,52 @@ def callback(call):
     
     # ---------- EDIT SERVICE ----------
     elif call.data.startswith("edit_service_"):
-        service_id = int(call.data.split("_")[-1])
-        editing_service_id[uid] = service_id
-        bot.send_message(call.message.chat.id, "⚙️ Send new service name:")
+        try:
+            service_id = int(call.data.split("_")[-1])
+            editing_service_id[uid] = service_id
+            bot.send_message(call.message.chat.id, "⚙️ Send new service name:")
+        except Exception as e:
+            bot.answer_callback_query(call.id, f"Error: {str(e)}")
     
     # ---------- UPLOAD SERVICE NUMBERS ----------
     elif call.data.startswith("upload_service_"):
-        service_id = int(call.data.split("_")[-1])
-        upload_flow_service[uid] = service_id
-        
-        cursor.execute("SELECT id, country FROM countries")
-        countries = cursor.fetchall()
-        
-        if not countries:
-            bot.send_message(call.message.chat.id, "⚠️ Add countries first")
-            upload_flow_service.pop(uid, None)
-            return
-        
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        for country_id, country_name in countries:
-            markup.add(types.InlineKeyboardButton(f"🌍 {country_name}", callback_data=f"select_country_for_upload_{country_id}"))
-        
-        bot.send_message(call.message.chat.id, "🌍 Select Country:", reply_markup=markup)
+        try:
+            service_id = int(call.data.split("_")[-1])
+            upload_flow_service[uid] = service_id
+            
+            with db_lock:
+                cursor.execute("SELECT id, country FROM countries")
+                countries = cursor.fetchall()
+            
+            if not countries:
+                bot.send_message(call.message.chat.id, "⚠️ Add countries first")
+                upload_flow_service.pop(uid, None)
+                return
+            
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            for country_id, country_name in countries:
+                markup.add(types.InlineKeyboardButton(f"🌍 {country_name}", callback_data=f"select_country_for_upload_{country_id}"))
+            
+            bot.send_message(call.message.chat.id, "🌍 Select Country:", reply_markup=markup)
+        except Exception as e:
+            bot.answer_callback_query(call.id, f"Error: {str(e)}")
     
     # ---------- SELECT COUNTRY FOR UPLOAD ----------
     elif call.data.startswith("select_country_for_upload_"):
-        country_id = int(call.data.split("_")[-1])
-        upload_flow_country[uid] = country_id
-        bot.send_message(call.message.chat.id, "📄 Send .txt file\n\nNumbers format:\n- One per line\n- Or comma separated")
+        try:
+            country_id = int(call.data.split("_")[-1])
+            upload_flow_country[uid] = country_id
+            bot.send_message(call.message.chat.id, "📄 Send .txt file\n\nNumbers format:\n- One per line\n- Or comma separated")
+        except Exception as e:
+            bot.answer_callback_query(call.id, f"Error: {str(e)}")
     
     # ---------- CLEAR SERVICE NUMBERS ----------
     elif call.data.startswith("clear_service_"):
-        service_id = int(call.data.split("_")[-1])
         try:
-            cursor.execute("DELETE FROM numbers_upload WHERE service_id = ?", (service_id,))
-            conn.commit()
+            service_id = int(call.data.split("_")[-1])
+            with db_lock:
+                cursor.execute("DELETE FROM numbers_upload WHERE service_id = ?", (service_id,))
+                conn.commit()
             bot.answer_callback_query(call.id, "✅ Cleared")
             bot.edit_message_text("✅ Numbers cleared!", call.message.chat.id, call.message.message_id)
         except Exception as e:
